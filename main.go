@@ -18,7 +18,10 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
+	"io/ioutil"
 	"net/http"
 	"os"
 	"os/signal"
@@ -117,7 +120,32 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	go serveMetrics(cfg.MetricsAddress)
+	mux := http.NewServeMux()
+
+	go registerMetrics(mux)
+
+	caCert, err := ioutil.ReadFile("temp/cert.pem")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	caCertPool := x509.NewCertPool()
+	caCertPool.AppendCertsFromPEM(caCert)
+	tlsConfig := &tls.Config{
+		ClientCAs:  caCertPool,
+		ClientAuth: tls.RequireAndVerifyClientCert,
+	}
+
+	server := &http.Server{
+		Handler:   mux,
+		Addr:      cfg.MetricsAddress,
+		TLSConfig: tlsConfig,
+	}
+
+	go func() {
+		log.Fatalln(server.ListenAndServeTLS("temp/cert.pem", "temp/key.pem"))
+	}()
+
 	go handleSigterm(cancel)
 
 	// error is explicitly ignored because the filter is already validated in validation.ValidateConfig
@@ -486,13 +514,11 @@ func handleSigterm(cancel func()) {
 	cancel()
 }
 
-func serveMetrics(address string) {
-	http.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+func registerMetrics(mx *http.ServeMux) {
+	mx.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
 	})
 
-	http.Handle("/metrics", promhttp.Handler())
-
-	log.Fatal(http.ListenAndServe(address, nil))
+	mx.Handle("/metrics", promhttp.Handler())
 }
